@@ -22,6 +22,12 @@ The `results` and `summary` directories already contain the numbers shown in Fig
       - `run_train_nvidia_micro.py`
       - `run_train_nvidia_neusight.py`
 
+first activate the right venv that has correct verion of python, torch and cuda
+cd /home/deo/NeuSight
+source torch21-cuda121/bin/activate
+pip install -e .
+
+
 3. **Use the provided evaluation scripts to predict model execution latencies:**
    - `run_pred_amd_neusight.py`
    - `run_pred_nvidia_habitat.py`

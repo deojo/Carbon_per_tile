@@ -1,6 +1,10 @@
 import torch
 import torch.nn as nn
 
+import warnings
+
+warnings.filterwarnings("ignore")
+
 class ModelBase(nn.Module):
     def __init__(self,config,tag,device):
         super().__init__()

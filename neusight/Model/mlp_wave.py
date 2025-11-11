@@ -1,9 +1,14 @@
-
 import torch
 import torch.nn as nn
 from .model import ModelBase
 import pickle
 from .meta import MetaTable
+import os
+from datetime import datetime
+import uuid
+import logging
+from multiprocessing import Lock
+
 
 class MLPBlock(nn.Module):
     def __init__(self, input_dim, output_dim, hidden_dim, num_layers, act, dropout_rate):
@@ -311,11 +316,12 @@ class MLPWave(ModelBase):
         self.last_num_wave = num_wave_detached
         self.last_time_per_wave = time_per_wave
         self.last_num_block = num_block
+        self.last_ebw = ebw
 
         return num_wave, time_per_wave
 
     def forward(self, opname, x, tiles=None, device=None, culib=None, label=None):
-        tiles = self.get_tiles(x=x, tiles=tiles, culib=culib,opname=opname)
+        tiles = self.get_tiles(x=x, tiles=tiles, culib=culib, opname=opname)
 
         # compute wave nums
         num_wave, time_per_wave = self.compute_wave_time(opname=opname, x=x, tiles=tiles)
@@ -324,20 +330,25 @@ class MLPWave(ModelBase):
         time = num_wave * time_per_wave
         # time += self.bias
 
-        # stats
+        # Compute time per tile
+        time_per_tile = self.compute_tile_ops(x=x, tiles=tiles, opname=opname) / self.last_ebw
+
+        # Stats
         self.last_pred = time
 
-        # record for test pickle
+        # Record for test pickle
         if self.record:
             entry = {
-                "f2i" : self.f2i_dict,
-                "input" : x.cpu().squeeze(),
-                "pred" : self.last_pred.item(),
-                "Latency" : label.item(),
-                "opname" : opname[0],
-                "bw_util" : self.last_bw_util.cpu().squeeze(),
+                "f2i": self.f2i_dict,
+                "input": x.cpu().squeeze(),
+                "pred": self.last_pred.item(),
+                "Latency": label.item(),
+                "opname": opname[0],
+                "bw_util": self.last_bw_util.cpu().squeeze(),
             }
             self.record_entries.append(entry)
 
-        return time
-    
+        # Return prediction, time_per_wave, and time_per_tile
+        
+        predi = [time, time_per_wave, time_per_tile, self.last_bw_util, tiles]
+        return predi

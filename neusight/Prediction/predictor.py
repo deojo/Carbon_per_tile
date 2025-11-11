@@ -1,4 +1,3 @@
-
 from pathlib import Path
 import pandas as pd
 import json
@@ -10,6 +9,8 @@ from ..Model.model_provider import model_provider
 from ..Tracing.parse import parse_trace
 from ..Tracing.trace import trace_graph
 from .aggregator import aggregate_latency
+from ..Model.mlp_wave_vec import MLPWaveVec
+from ..Model.mlp_wave_mm import MLPWaveMM
 
 ops_dict = {
     "add" : 1.,
@@ -25,9 +26,27 @@ ops_dict = {
     "softmax" : 5.,
     "relu" : 1.,
     "gelu" : 1.,
+    "silu" : 1.,
     "MEM" : 0.,
 }
 
+modes = ['op', 'wave', 'tile']
+
+def ensure_sequence(val):
+    return val if isinstance(val, (list, tuple, np.ndarray)) else [val]
+
+def safe_get(item, idx, default=0.0):
+    try:
+        return item[idx]
+    except (IndexError, TypeError):
+        return default
+
+def safe_tensor_to_list(tensor):
+    if isinstance(tensor, (list, tuple)):
+        return list(tensor)
+    elif hasattr(tensor, 'tolist'):
+        return tensor.tolist()
+    return []
 
 def reduce_mul(myList):
     # Multiply elements one by one
@@ -71,10 +90,18 @@ class MLPredictor:
         # predict runtime with model
         culib = "cu121"
         pred = self.model(opname=opname, x=inputs, device=all_params["Device"], culib=culib)
-        pred = pred.detach().cpu()
-        pred = np.maximum(pred, 0) # for habitat
-        pred = float(pred.squeeze().item())
+        
+        for i, p in enumerate(pred):
+            p = p.detach().cpu()             
+            if p.numel() == 1:
+                p = np.maximum(p, 0)
+                pred[i] = float(p.item())
+            else:
+                pred[i] = p
+            #pred[i] = float(p.squeeze().item())  # convert to float
 
+
+        #print(f"\npred: {pred}\n")
         return pred
 
 class OperatorPredictor():
@@ -110,7 +137,9 @@ class OperatorPredictor():
                 ops,
     ):
         latency = 0
-    
+        mem = 0
+        pr = [0.0, float("NaN"), float("NaN"), float("NaN"), float("NaN")]
+
         if opname == "fused":
             assert(input_shapes is not None)
             assert(output_shape is not None)
@@ -136,6 +165,7 @@ class OperatorPredictor():
 
             # count ops
             acc_ops = 0.
+
             for op in ops:
                 opname, args = op
                 opname = opname.replace("VEC", "")
@@ -148,21 +178,25 @@ class OperatorPredictor():
             opsPerO = acc_ops / num_output_elem
 
             # call predictor
+
             opname, args = rep_op
             if opname.startswith("VEC"):
                 opname = opname.replace("VEC", "")
                 B, H = args
                 if "softmax" in opname.lower():
-                    latency += self.softmax_predictor.predict(opname=[opname],kernel_arguments={"B":B,"H":H, "MemPerO":memPerO, "OpsPerO":opsPerO},device_config=device_config)
+                    pr = self.softmax_predictor.predict(opname=[opname],kernel_arguments={"B":B,"H":H, "MemPerO":memPerO, "OpsPerO":opsPerO},device_config=device_config)
                     # print("last bw util", self.softmax_predictor.model.last_bw_util)
+                
                 elif "ln" in opname.lower():
-                    latency += self.ln_predictor.predict(opname=[opname],kernel_arguments={"B":B,"H":H, "MemPerO":memPerO, "OpsPerO":opsPerO},device_config=device_config)
+                    pr = self.ln_predictor.predict(opname=[opname],kernel_arguments={"B":B,"H":H, "MemPerO":memPerO, "OpsPerO":opsPerO},device_config=device_config)
                     # print("last bw util", self.ln_predictor.model.last_bw_util)
+                
                 else:
-                    latency += self.vec_predictor.predict(opname=[opname],kernel_arguments={"B":B,"H":H, "MemPerO":memPerO, "OpsPerO":opsPerO},device_config=device_config)
+                    pr = self.vec_predictor.predict(opname=[opname],kernel_arguments={"B":B,"H":H, "MemPerO":memPerO, "OpsPerO":opsPerO},device_config=device_config)
                     # print("last bw util", self.vec_predictor.model.last_bw_util)
 
-
+                latency += pr[0]
+                
             elif opname == "MEM":
                 mem = (num_input_elem + num_output_elem) * 4
                 latency += mem / (self.mem_bw * (2**30))
@@ -178,12 +212,14 @@ class OperatorPredictor():
                 if opname == "Linear":
                     B = 1
                     M, N, K = args
-                    latency += self.linear_predictor.predict(opname=["linear"],kernel_arguments={"B":B,"M":M,"N":N,"K":K},device_config=device_config)
-                
+                    pr = self.linear_predictor.predict(opname=["linear"],kernel_arguments={"B":B,"M":M,"N":N,"K":K},device_config=device_config)
+                    latency += pr[0]
+                    
                 elif opname == "BMM":
                     B, M, N, K = args
-                    latency += self.bmm_predictor.predict(opname=["bmm"],kernel_arguments={"B":B,"M":M,"N":N,"K":K},device_config=device_config)
-                
+                    pr = self.bmm_predictor.predict(opname=["bmm"],kernel_arguments={"B":B,"M":M,"N":N,"K":K},device_config=device_config)
+                    latency += pr[0]
+                    
                 elif opname.startswith("VEC"):
                     assert(input_shapes is not None)
                     assert(output_shape is not None)
@@ -196,12 +232,17 @@ class OperatorPredictor():
                     opsPerO = ops_dict[opname]
 
                     if "softmax" in opname.lower():
-                        latency += self.softmax_predictor.predict(opname=[opname],kernel_arguments={"B":B,"H":H, "MemPerO":memPerO, "OpsPerO":opsPerO},device_config=device_config)
+                        pr = self.softmax_predictor.predict(opname=[opname],kernel_arguments={"B":B,"H":H, "MemPerO":memPerO, "OpsPerO":opsPerO},device_config=device_config)    
+                     
                     elif "ln" in opname.lower():
-                        latency += self.ln_predictor.predict(opname=[opname],kernel_arguments={"B":B,"H":H, "MemPerO":memPerO, "OpsPerO":opsPerO},device_config=device_config)
+                        pr = self.ln_predictor.predict(opname=[opname],kernel_arguments={"B":B,"H":H, "MemPerO":memPerO, "OpsPerO":opsPerO},device_config=device_config)
+        
                     else:
-                        latency += self.vec_predictor.predict(opname=[opname],kernel_arguments={"B":B,"H":H, "MemPerO":memPerO, "OpsPerO":opsPerO},device_config=device_config)
+                        pr = self.vec_predictor.predict(opname=[opname],kernel_arguments={"B":B,"H":H, "MemPerO":memPerO, "OpsPerO":opsPerO},device_config=device_config)
+                        
+                    latency += pr[0]
 
+                      
                 elif opname == "MEM":
                     mem = 0
                     for shape in args:
@@ -210,7 +251,8 @@ class OperatorPredictor():
                 
                 elif opname == "ALLREDUCE" or opname=="ALLREDUCE_ASYNC":
                     buffer_size = args[0]
-                    num_gpu = 4
+                    num_gpu = 8
+                    
                     latency += (buffer_size * 4) / (self.link_bw * (2**30)) * (num_gpu - 1)
                     # latency += (buffer_size * 4) * self.bw_coeff + self.bw_bias
 
@@ -225,8 +267,12 @@ class OperatorPredictor():
                 else:
                     print(opname)
                     raise NotImplementedError
-            
-        return latency
+
+        #print(f"in predict_phase pr1: {pr[1]}, pr2: {pr[2]}, pr3: {pr[3]}, pr4: {pr[4]}")    
+        mem_energy_pj = mem * 3.6
+        mem_energy_kwh = mem_energy_pj * (100/36) * (10 ** -19)
+        return (latency, pr[1], pr[2], pr[3], pr[4], mem_energy_kwh)
+        #return (latency, pr[1], pr[2], pr[3], pr[4])
 
 
     def predict(
@@ -245,6 +291,8 @@ class OperatorPredictor():
         self.util = 0.72
         if device_name == "NVIDIA H100 80GB HBM3":
             self.link_bw = 900 * self.util / 2 # in GB/s
+        elif device_name == "Tesla V100-SXM2-16GB":
+            self.link_bw = 300 * self.util / 2
         elif device_name == "NVIDIA A100-PCIE-40GB" or device_name == "NVIDIA A100-SXM4-40GB":
             self.link_bw = 600 * self.util / 2 # in GB/s
         else:
@@ -261,11 +309,34 @@ class OperatorPredictor():
         bw_ops = x.loc["BwOps"]
         acc_ops = x.loc["AccOps"]
         
-        fw_latency = self.predict_phase(device_config=device_config, input_shapes=input_shapes, output_shape=output_shape, ops=fw_ops, opname=opname)
-        bw_latency = self.predict_phase(device_config=device_config, input_shapes=input_shapes, output_shape=output_shape, ops=bw_ops, opname=opname)
-        acc_latency = self.predict_phase(device_config=device_config, input_shapes=input_shapes, output_shape=output_shape, ops=acc_ops, opname=opname)
+        fw_out = self.predict_phase(
+            device_config=device_config, input_shapes=input_shapes,
+            output_shape=output_shape, ops=fw_ops, opname=opname)
+        bw_out = self.predict_phase(
+            device_config=device_config, input_shapes=input_shapes,
+            output_shape=output_shape, ops=bw_ops, opname=opname)
+        acc_out = self.predict_phase(
+            device_config=device_config, input_shapes=input_shapes,
+            output_shape=output_shape, ops=acc_ops, opname=opname)
 
-        return pd.Series([fw_latency * 1000, bw_latency * 1000, acc_latency * 1000]) # sec to ms
+        if not isinstance(fw_out, (list, tuple, np.ndarray)):
+            fw_out = [fw_out]
+        if not isinstance(bw_out, (list, tuple, np.ndarray)):
+            bw_out = [bw_out]
+        if not isinstance(acc_out, (list, tuple, np.ndarray)):
+                acc_out = [acc_out]
+
+        return (
+            safe_get(fw_out, 0) * 1000, safe_get(bw_out, 0) * 1000, safe_get(acc_out, 0) * 1000,  # op latency (ms)
+            safe_get(fw_out, 1) * 1000, safe_get(bw_out, 1) * 1000, safe_get(acc_out, 1) * 1000,  # wave latency (ms)
+            safe_get(fw_out, 2) * 1000, safe_get(bw_out, 2) * 1000, safe_get(acc_out, 2) * 1000,  # tile latency (ms)
+            safe_get(fw_out, 3, 1.0), safe_get(bw_out, 3, 1.0), safe_get(acc_out, 3, 1.0),        # util (default 1.0)
+            safe_tensor_to_list(safe_get(fw_out, 4, [])),
+            safe_tensor_to_list(safe_get(bw_out, 4, [])),
+            safe_tensor_to_list(safe_get(acc_out, 4, [])),
+            safe_get(fw_out, 5), safe_get(bw_out, 5), safe_get(acc_out, 5),
+        )
+            
 
 class NeusightPredictor():
     def __init__(
@@ -276,7 +347,7 @@ class NeusightPredictor():
     ):
 
         self.name = predictor_name
-
+        self.CI_US = 380
         if tile_dataset_dir != "":
             tile_dataset_dir = Path(tile_dataset_dir)
 
@@ -358,7 +429,8 @@ class NeusightPredictor():
 
         device_config_path = Path(device_config_path)
         device_config_path = device_config_path.absolute()
-        # print(device_config_path)
+
+        print(f"device_config_path: {device_config_path}")
         with open(device_config_path, "r") as f:
             device_config = json.load(f)
 
@@ -388,27 +460,79 @@ class NeusightPredictor():
         print(parse_name)
         if os.path.exists(parse_name):
             print("already exists : ", os.path.realpath(parse_name))
-            pass
+            
         else:
             df = parse_trace(
-                            trace_name, 
-                            is_train=is_train, 
-                            bench=False, 
-                            fusion=fusion,
-                            distributed=distributed,
-                            dp_degree=dp_degree,
-                            pp_degree=pp_degree,
-                            pp_num_microbatch=pp_num_microbatch,
-                            tp_degree=tp_degree,
-                        )
+                    trace_name, 
+                    is_train=is_train, 
+                    bench=False, 
+                    fusion=fusion,
+                    distributed=distributed,
+                    dp_degree=dp_degree,
+                    pp_degree=pp_degree,
+                    pp_num_microbatch=pp_num_microbatch,
+                    tp_degree=tp_degree,
+                )
             dump_df(df, parse_name)
 
         # annotate operator graph with prediction
-        df = pd.read_csv(parse_name, converters={"FwOps": ast.literal_eval, "BwOps": ast.literal_eval, "AccOps": ast.literal_eval, "InputShapes": ast.literal_eval, "OutputShape": ast.literal_eval})
-        df[[f"fw_latency", f"bw_latency", f"acc_latency"]] = df.apply(lambda x: self.predictor.predict(device_config, x), axis=1)
-        df[f"bwall_latency"] = df[f"bw_latency"] + df[f"acc_latency"]
-        df[f"e2e_latency"] = df[f"fw_latency"] + df[f"bw_latency"] + df[f"acc_latency"]
+        df = pd.read_csv(parse_name, converters={"FwOps": ast.literal_eval,
+                                                "BwOps": ast.literal_eval,
+                                                "AccOps": ast.literal_eval,
+                                                "InputShapes": ast.literal_eval,
+                                                "OutputShape": ast.literal_eval}
+                                                )
+        
+        df[
+            ["fw_op_latency", "bw_op_latency", "acc_op_latency",
+            "fw_wave_latency", "bw_wave_latency", "acc_wave_latency",
+            "fw_tile_latency", "bw_tile_latency", "acc_tile_latency",
+            "fw_util", "bw_util", "acc_util",
+            "fw_tile_dim", "bw_tile_dim", "acc_tile_dim",
+            "fw_mem_kwh", "bw_mem_kwh", "acc_mem_kwh"]
+        ] = df.apply(lambda x: pd.Series(self.predictor.predict(device_config, x)), axis=1)
 
+
+        for lat in modes:
+            df[f"bwall_{lat}_latency"] = (
+                df[f"bw_{lat}_latency"].fillna(0.0) + df[f"acc_{lat}_latency"].fillna(0.0)
+            )
+            df[f"e2e_{lat}_latency"] = (
+                df[f"fw_{lat}_latency"].fillna(0.0) +
+                df[f"bw_{lat}_latency"].fillna(0.0) +
+                df[f"acc_{lat}_latency"].fillna(0.0)
+            )
+
+
+
+        carbon_input_cols = ["FwOps", "BwOps", "AccOps",
+            "fw_op_latency", "bw_op_latency", "acc_op_latency",
+            "fw_tile_latency", "bw_tile_latency", "acc_tile_latency",
+            "e2e_op_latency", "e2e_tile_latency",
+            "fw_util", "bw_util", "acc_util"
+        ]
+
+        device = device_config['Device'].replace(' ', '_')
+        #print(f"Using device: {device}")
+
+        # Compute carbon per row and add new columns to df
+        carbon_dicts = df.apply(
+            lambda row: self.compute_total_carbon(device, row[carbon_input_cols].to_dict(), distributed),
+            axis=1
+        )
+
+        # Expand the returned dictionaries into new DataFrame columns and join to original df
+        carbon_df = pd.DataFrame(carbon_dicts.tolist())
+        df = pd.concat([df, carbon_df], axis=1)
+
+
+        for col in ["fw_op_carbon", "bw_op_carbon", "acc_op_carbon"]:
+            if col not in df:
+                df[col] = 0.0
+
+        # Define correct masks
+                        
+        df.fillna("0.0e0", inplace=True)
         with open(model_config_path) as f:
             config_json = json.load(f)
         if "gpt" in model_name:
@@ -418,14 +542,16 @@ class NeusightPredictor():
         else:
             n_layer = config_json["num_hidden_layers"]
 
+        # accumulate latency
 
         out_path = result_dir/f"prediction/{device_config['Device'].replace(' ', '_')}/{self.name}/{model_tag}.csv"
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(out_path, index=False)
 
-        # accumulate latency
-        e2e, fw, bw, bwall, acc = aggregate_latency(
+        
+        # accumulate latency + carbon + energy
+        e2e, fw, bw, bwall, acc, carb = aggregate_latency(
                                                     df, 
                                                     model_name, 
                                                     distributed=distributed,
@@ -436,6 +562,80 @@ class NeusightPredictor():
                                                     fusion=fusion,
                                                     n_layer=n_layer,
                                                 )
+
+        # Remove the row with Groups == "Empty"
+        carb = carb[carb['Groups'] != "Empty"]
+    
+        print(f'agg_tile_energy_kwh: {carb[["Groups", "agg_tile_energy_kwh", "agg_count"]]}')
+        # Compute totals
+        total_op_carbon = carb["agg_op_carbon"].sum()
+        total_op_latency = carb["agg_op_latency"].sum()
+        total_op_energy_kwh = carb["agg_op_energy_kwh"].sum()
+
+        total_tile_carbon = carb["agg_tile_carbon"].sum()
+        total_tile_latency = carb["agg_tile_latency"].sum()
+        total_tile_energy_kwh = carb["agg_tile_energy_kwh"].sum()
+        #print(f"total_tile_energy_kwh: {total_tile_energy_kwh}")
+
+        total_count = carb["agg_count"].sum()
+
+        # Compute percentages
+        carb["pct_op_carbon"] = (carb["agg_op_carbon"] / total_op_carbon * 100).round(2)
+        carb["pct_op_latency"] = (carb["agg_op_latency"] / total_op_latency * 100).round(2)
+        carb["pct_op_energy_kwh"] = (carb["agg_op_energy_kwh"] / total_op_energy_kwh * 100).round(2)
+
+        # Add averages per op
+        for mode in ['op', 'tile']:
+            for metric in ['carbon', 'latency', 'energy_kwh']:
+                carb[f"avg_{mode}_{metric}"] = (
+                    carb[f"agg_{mode}_{metric}"] / carb["agg_count"]
+                ).replace([np.inf, -np.inf], 0).fillna(0).round(15)
+
+        # Create a summary row
+        summary_row = pd.DataFrame([{
+            "Groups": "TOTAL",
+            "agg_op_carbon": total_op_carbon,
+            "agg_op_latency": total_op_latency,
+            "agg_op_energy_kwh": total_op_energy_kwh,
+            "agg_tile_carbon": total_tile_carbon,
+            "agg_tile_latency": total_tile_latency,
+            "agg_tile_energy_kwh": total_tile_energy_kwh,
+            "agg_count": total_count,
+            "pct_op_carbon": 100.0,
+            "pct_op_latency": 100.0,
+            "pct_op_energy_kwh": 100.0
+        }])
+
+        # Append the summary row to the original DataFrame
+        carb = pd.concat([carb, summary_row], ignore_index=True)
+
+        print(f"\nNew value carb: \n{carb}\n")
+
+        # Select specific columns (now including energy_kwh)
+        selected_columns = carb[
+            [
+                'Groups',
+                'agg_op_carbon', 'agg_op_latency', 'agg_op_energy_kwh',
+                'avg_op_carbon', 'avg_op_latency', 'avg_op_energy_kwh',
+                'avg_tile_carbon', 'avg_tile_latency', 'avg_tile_energy_kwh',
+                'agg_count',
+                'pct_op_carbon', 'pct_op_latency', 'pct_op_energy_kwh'
+            ]
+        ]
+
+    
+        # Target file
+        output_file = os.path.join(result_dir, 'prediction', 'carbon_summary.csv')
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+
+        # Append to the CSV file
+        write_header = not os.path.exists(output_file)
+        with open(output_file, mode='a') as f:
+            f.write(f"\n{device} / {model_tag}\n")  
+            selected_columns.to_csv(f, header=True, index=False)
+        
+        print(f"E2E latency for {model_tag} on {device_config_path.name}:", round(e2e, 2), "ms")
+        print("\n")
 
         json_dict = {
             "num_layer": n_layer,
@@ -450,4 +650,139 @@ class NeusightPredictor():
         with open(out_path.with_suffix(".json"), 'w') as file:
             json.dump(json_dict, file, indent=4)
 
-        print(f"E2E latency for {model_tag} on {device_config_path.name}:", round(e2e, 2), "ms")
+
+    def compute_total_carbon(self, device: str, latency_data: dict, distributed: bool):
+        DEVICE_TDP = {
+            "NVIDIA_A100-SXM4-40GB": 400.0,
+            "Tesla_P100-PCIE-16GB": 250.0,
+            "Tesla_V100-PCIE-32GB": 250.0,
+            "Tesla_V100-SXM2-16GB": 300.0,
+            "NVIDIA_A100_80GB_PCIe": 300.0,
+            "NVIDIA_H100_80GB_HBM3": 700.0,
+            "Tesla_P4": 75.0,
+            "NVIDIA_A100-PCIE-40GB": 250.0,
+            "NVIDIA_L4": 72.0,
+            "Tesla_T4": 70.0,
+            "NVIDIA_B200": 1200.0,
+        }
+
+        EMBODIED_CARBON_TOTAL = {
+            "Tesla_V100-PCIE-32GB": 163_793.98,
+            "Tesla_V100-SXM2-16GB": 163_793.98,
+            "NVIDIA_A100_80GB_PCIe": 150_000.00,
+            "NVIDIA_A100-PCIE-40GB": 24_666.72,
+            "NVIDIA_A100-SXM4-40GB": 24_666.72,
+            "Tesla_P100-PCIE-16GB": 14_000.00,
+            "NVIDIA_H100_80GB_HBM3": 164_000,
+            "Tesla_P4": 10_300.00,
+            "NVIDIA_L4": 12_000.00,
+            "Tesla_T4": 10_300.00,
+            "NVIDIA_B200": 63_700.00 * 5.0606,
+        }
+
+        EMBODIED_CARBON_MEM = {
+            "NVIDIA_A100_80GB_PCIe": 80_000.00,
+            "NVIDIA_A100-PCIE-40GB": 40_000.00,
+            "NVIDIA_A100-SXM4-40GB": 40_000.00,
+            "NVIDIA_H100_80GB_HBM3": 68_250,
+            "NVIDIA_B200": 186_000.00,
+        }
+
+        num_gpu = 1
+        if distributed:
+            print(f"\nReceived distributed for device: {device}\n")
+            num_gpu = 8
+
+        # Constants
+        CI_US = 380  # gCO₂ per kWh
+        LT_MS = 6 * 365 * 24 * 60 * 60 * 1000  # 6 years in ms
+
+        expected_latency_cols = [
+            "fw_op_latency", "bw_op_latency", "acc_op_latency",
+            "fw_tile_latency", "bw_tile_latency", "acc_tile_latency"
+        ]
+
+        expected_keys = [
+            "fw_op_carbon", "bw_op_carbon", "acc_op_carbon",
+            "fw_tile_carbon", "bw_tile_carbon", "acc_tile_carbon",
+            "e2e_op_carbon", "e2e_tile_carbon"
+        ]
+
+        tdp = DEVICE_TDP.get(device)
+        carbon_per_latency = {}
+
+        for col_name in expected_latency_cols:
+            embodied_carbon = EMBODIED_CARBON_TOTAL.get(device)
+            latency_ms = latency_data.get(col_name, 0.0)
+            if pd.isna(latency_ms):
+                latency_ms = 0.0
+
+            op_pass = ''
+            if "fw" in col_name:
+                op_pass = 'fw'
+            elif "bw" in col_name:
+                op_pass = 'bw'
+            elif "acc" in col_name:
+                op_pass = 'acc'
+
+            util = latency_data.get(f"{op_pass}_util", 1.0)
+            if pd.isna(util):
+                util = 1.0
+
+            ops = latency_data.get(f"{op_pass.upper()}Ops", [])
+            latency_hr = latency_ms / (1000 * 3600)  # ms → hr
+
+            # Energy consumption (kWh)
+            if ops and any(op[0] == "MEM" for op in ops):
+                energy_kWh = latency_data.get(f'{op_pass}_mem_kwh', 0.0)
+                print(f"\n energy_kwh for MEM: {energy_kWh}\n")
+                embodied_carbon = EMBODIED_CARBON_MEM.get(device)
+            else:
+                energy_kWh = (tdp * num_gpu * latency_hr * util) / 1000
+
+            # Carbon emissions
+            carbon_op = energy_kWh * CI_US
+            carbon_em = (latency_ms / LT_MS) * embodied_carbon * num_gpu
+            carbon_total = carbon_op + carbon_em
+
+            # Save both carbon and energy
+            carbon_key = col_name.replace('latency', 'carbon')
+            energy_key = col_name.replace('latency', 'energy_kwh')
+
+            carbon_per_latency[carbon_key] = f"{carbon_total:.6e}"
+            carbon_per_latency[energy_key] = f"{energy_kWh:.6e}"
+
+        # Fill missing expected keys
+        for key in expected_keys:
+            if key not in carbon_per_latency:
+                carbon_per_latency[key] = 0.0
+
+        # Aggregate totals
+        carbon_per_latency["e2e_op_carbon"] = (
+            float(carbon_per_latency["fw_op_carbon"]) +
+            float(carbon_per_latency["bw_op_carbon"]) +
+            float(carbon_per_latency["acc_op_carbon"])
+        )
+        carbon_per_latency["e2e_tile_carbon"] = (
+            float(carbon_per_latency["fw_tile_carbon"]) +
+            float(carbon_per_latency["bw_tile_carbon"]) +
+            float(carbon_per_latency["acc_tile_carbon"])
+        )
+
+        #print(f"carbon_per_latency: {carbon_per_latency}")
+        return carbon_per_latency
+
+
+
+    def ms_to_hours(self, ms):
+        return ms / (1000 * 60 * 60)
+    
+    def safe_float(val, default=1.0):
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return default
+   
+   
+    
+    

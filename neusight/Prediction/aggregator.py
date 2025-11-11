@@ -1,5 +1,89 @@
 
-import pandas as pd
+import re, pandas as pd
+
+modes = ['op', 'tile']
+metrics = ['carbon', 'latency', 'energy_kwh']
+
+def op_matches_prefix(op_list, prefix):
+    for entry in op_list:
+        if isinstance(entry, list) and len(entry) > 0 and isinstance(entry[0], str):
+            match = re.search(f'({")|(".join(i for i in prefix)})', entry[0])
+            if match:
+                return match.group(0)
+            return "Others"
+    return "Empty"
+
+def aggregate_carbon(trace):
+    #print(f"[DEBUG] trace: {trace}")
+    dfs = []
+    prefixes = ['VECln', 'VECsoftmax', 'VECadd', 'VEC', 'BMM', 'Linear', 'MEM']
+
+    # Ensure all required columns exist
+    for x in ['Fw', 'Bw', 'Acc']:
+        for mode in modes:
+            for metric in metrics:
+                col = f"{x.lower()}_{mode}_{metric}"
+                if col not in trace.columns:
+                    trace[col] = 0.0
+                trace[col] = pd.to_numeric(trace[col], errors="coerce").fillna(0)
+
+    for x in ['Fw', 'Bw', 'Acc']:
+        # Assign group label based on op prefixes
+        trace['Groups'] = trace[f'{x}Ops'].apply(op_matches_prefix, prefix=prefixes)
+
+        # Group by assigned group label
+        grouped = trace.groupby('Groups')
+
+        # Aggregate sum and count
+        temp = grouped.agg(
+            op_carbon=pd.NamedAgg(column=f"{x.lower()}_op_carbon", aggfunc="sum"),
+            op_latency=pd.NamedAgg(column=f"{x.lower()}_op_latency", aggfunc="sum"),
+            op_energy_kwh=pd.NamedAgg(column=f"{x.lower()}_op_energy_kwh", aggfunc="sum"),
+            tile_carbon=pd.NamedAgg(column=f"{x.lower()}_tile_carbon", aggfunc="sum"),
+            tile_latency=pd.NamedAgg(column=f"{x.lower()}_tile_latency", aggfunc="sum"),
+            tile_energy_kwh=pd.NamedAgg(column=f"{x.lower()}_tile_energy_kwh", aggfunc="sum"),
+            count=pd.NamedAgg(column=f"{x.lower()}_op_carbon", aggfunc="count")
+        ).reset_index()
+
+        # Rename columns to indicate pass
+        temp = temp.rename(columns={
+            'op_carbon': f'op_carbon_{x.lower()}',
+            'op_latency': f'op_latency_{x.lower()}',
+            'op_energy_kwh': f'op_energy_kwh_{x.lower()}',
+            'tile_carbon': f'tile_carbon_{x.lower()}',
+            'tile_latency': f'tile_latency_{x.lower()}',
+            'tile_energy_kwh': f'tile_energy_kwh_{x.lower()}',
+            'count': f'count_{x.lower()}'
+        })
+
+        dfs.append(temp)
+
+    # Merge the three aggregated DataFrames on 'Groups'
+    merged_df = dfs[0]
+    for df in dfs[1:]:
+        merged_df = pd.merge(merged_df, df, on='Groups', how='outer')
+
+    # Fill NaNs with 0
+    for col in merged_df.columns:
+        if col != 'Groups':
+            merged_df[col] = pd.to_numeric(merged_df[col], errors='coerce').fillna(0)
+
+    # Compute total sums across passes
+    for mode in modes:
+        for metric in metrics:                         # now also includes energy_kwh
+            merged_df[f'agg_{mode}_{metric}'] = (
+                merged_df.get(f'{mode}_{metric}_fw', 0) +
+                merged_df.get(f'{mode}_{metric}_bw', 0) +
+                merged_df.get(f'{mode}_{metric}_acc', 0)
+            )
+
+    merged_df['agg_count'] = (
+        merged_df.get('count_fw', 0) +
+        merged_df.get('count_bw', 0) +
+        merged_df.get('count_acc', 0)
+    )
+
+    return merged_df
 
 def replicate_layer(trace, model_name, n_layer, options=""):
 
@@ -19,6 +103,9 @@ def replicate_layer(trace, model_name, n_layer, options=""):
     elif "opt" in model_name.lower():
         start = trace['Name'].loc[lambda x: x=="model_decoder_layers_0_self_attn_layer_norm"].index.item()
         end = trace['Name'].loc[lambda x: x=="view_11"].index.item() + 1
+    elif "llama" in model_name.lower():
+        start = trace['Name'].loc[lambda x: x=="model_layers_0_input_layernorm_weight"].index.item()
+        end = trace['Name'].loc[lambda x: x=="model_layers_0_post_attention_layernorm_weight"].index.item() + 1
     elif "switch" in model_name.lower():
         # no need to convert
         return trace
@@ -40,31 +127,31 @@ def replicate_layer(trace, model_name, n_layer, options=""):
 def aggregate_gpt(trace, model_name, n_layer):
     trace = replicate_layer(trace, model_name, n_layer)
     # print(trace.columns)
-    e2e = trace[f"e2e_latency"].sum(axis=0)
-    fw = trace[f"fw_latency"].sum(axis=0)
-    bw = trace[f"bw_latency"].sum(axis=0)
-    bwall = trace[f"bwall_latency"].sum(axis=0)
-    acc = trace[f"acc_latency"].sum(axis=0)
+    e2e = trace[f"e2e_op_latency"].sum(axis=0)
+    fw = trace[f"fw_op_latency"].sum(axis=0)
+    bw = trace[f"bw_op_latency"].sum(axis=0)
+    bwall = trace[f"bwall_op_latency"].sum(axis=0)
+    acc = trace[f"acc_op_latency"].sum(axis=0)
 
-    return e2e, fw, bw, bwall, acc
+    return e2e, fw, bw, bwall, acc, aggregate_carbon(trace)
 
 def aggregate_tp(trace, model_name, tp_degree, n_layer):
     # replicate layers
     trace = replicate_layer(trace, model_name, n_layer)
-    pred_e2e = trace[f"e2e_latency"].sum(axis=0)
-    return pred_e2e
+    pred_e2e = trace[f"e2e_op_latency"].sum(axis=0)
+    return pred_e2e, aggregate_carbon(trace)
 
 def aggregate_dp(trace, model_name, dp_degree, n_layer):
     # replicate layers
     trace = replicate_layer(trace, model_name, n_layer)
 
     # acc fw latency
-    fw_e2e = trace[f"fw_latency"].sum(axis=0)
+    fw_e2e = trace[f"fw_op_latency"].sum(axis=0)
 
     rows = []
     for i, r in trace.iterrows():
         r = dict(r)
-        r["bw_latency"] = r["bwall_latency"]
+        r["bw_op_latency"] = r["bwall_op_latency"]
         rows.append(dict(r))
     rows = rows[::-1]
 
@@ -73,9 +160,9 @@ def aggregate_dp(trace, model_name, dp_degree, n_layer):
     comm_ops = [] # (start_time, latency)
     for r in rows:
         if r["Name"].endswith("_grad"):
-            comm_ops.append((compute_latency, r["bw_latency"]))
+            comm_ops.append((compute_latency, r["bw_op_latency"]))
         else:
-            compute_latency += r["bw_latency"]
+            compute_latency += r["bw_op_latency"]
 
     # when does comm ends?
     end_time = 0
@@ -86,7 +173,7 @@ def aggregate_dp(trace, model_name, dp_degree, n_layer):
     bw_e2e = max(end_time, compute_latency)
 
     pred_e2e = fw_e2e + bw_e2e
-    return pred_e2e
+    return pred_e2e, aggregate_carbon(trace)
 
 def aggregate_pp(trace, model_name, pp_degree, n_layer, num_micro_batch):
 
@@ -95,28 +182,64 @@ def aggregate_pp(trace, model_name, pp_degree, n_layer, num_micro_batch):
     per_device_layer = n_layer // pp_degree
 
     # single layer latency
-    start = trace['Name'].loc[lambda x: x=="transformer_h_0_ln_1"].index.item()
-    end = trace['Name'].loc[lambda x: x=="add_15"].index.item() + 1
+    print(f"\ntrace[Name]: {trace['Name'].unique()}\n")
+
+    #Old code
+    #start = trace['Name'].loc[lambda x: x=="transformer_h_0_ln_1"].index.item()
+    #end = trace['Name'].loc[lambda x: x=="add_15"].index.item() + 1
+
+    model_name = model_name.lower()
+
+    # New code Choose start/end ops based on model type
+    if "bert" in model_name:
+        start_op = "bert_encoder_layer_0_attention_self_query"
+        end_op = "bert_encoder_layer_0_output_layer_norm"
+    elif "gpt" in model_name or "opt" in model_name:
+        if "transformer_h_0_ln_1" in trace["Name"].values:
+            start_op = "transformer_h_0_ln_1"
+        elif "transformer_h_0_ln_1_grad" in trace["Name"].values:
+            start_op = "transformer_h_0_ln_1_grad"
+        else:
+            raise ValueError("GPT layer start op not found.")
+        end_op = "add_15"
+    elif "llama" in model_name:
+        start_op = "model_layers_0_input_layernorm"
+        end_op = "model_layers_0_post_attention_layernorm"
+    elif "switch" in model_name:
+        raise NotImplementedError("SwitchTransformer is not supported for pipeline parallelism in this function.")
+    else:
+        raise NotImplementedError(f"Unsupported model type: {model_name}")
+
+    # Resolve indices
+    start_matches = trace['Name'].loc[lambda x: x == start_op]
+    end_matches = trace['Name'].loc[lambda x: x == end_op]
+
+    if start_matches.empty or end_matches.empty:
+        raise ValueError(f"Start or end op not found in trace. Start: {start_op}, End: {end_op}")
+
+    start = start_matches.index[0]
+    end = end_matches.index[0] + 1
+    ### 
 
     begin = trace.iloc[:start]
     layer = trace.iloc[start:end]
     sendrecv = trace.iloc[end:end+1]
     end = trace.iloc[end+1:]
 
-    begin_fw_latency = begin[f"fw_latency"].sum(axis=0)
-    end_bw_latency = begin[f"bwall_latency"].sum(axis=0)
+    begin_fw_latency = begin[f"fw_op_latency"].sum(axis=0)
+    end_bw_latency = begin[f"bwall_op_latency"].sum(axis=0)
 
-    layer_fw_latency = layer[f"fw_latency"].sum(axis=0)
-    layer_bw_latency = layer[f"bwall_latency"].sum(axis=0)
+    layer_fw_latency = layer[f"fw_op_latency"].sum(axis=0)
+    layer_bw_latency = layer[f"bwall_op_latency"].sum(axis=0)
 
     per_device_layer_fw_latency = layer_fw_latency * per_device_layer
     per_device_layer_bw_latency = layer_bw_latency * per_device_layer
 
-    sendrecv_fw_latency = sendrecv[f"fw_latency"].sum(axis=0)
-    sendrecv_bw_latency = sendrecv[f"bwall_latency"].sum(axis=0)
+    sendrecv_fw_latency = sendrecv[f"fw_op_latency"].sum(axis=0)
+    sendrecv_bw_latency = sendrecv[f"bwall_op_latency"].sum(axis=0)
 
-    end_fw_latency = end[f"fw_latency"].sum(axis=0)
-    begin_bw_latency = end[f"bwall_latency"].sum(axis=0)
+    end_fw_latency = end[f"fw_op_latency"].sum(axis=0)
+    begin_bw_latency = end[f"bwall_op_latency"].sum(axis=0)
 
     pred_e2e = 0
 
@@ -147,7 +270,7 @@ def aggregate_pp(trace, model_name, pp_degree, n_layer, num_micro_batch):
         # + end_fw_latency*(num_micro_batch) \
         # + begin_bw_latency*(num_micro_batch) \
 
-    return pred_e2e
+    return pred_e2e, aggregate_carbon(trace)
 
 def aggregate_latency(
         df, 
@@ -168,14 +291,14 @@ def aggregate_latency(
 
     if distributed:
         if dp_degree > 1:
-            e2e = aggregate_dp(df, model_name, dp_degree, n_layer)
+            e2e, carb = aggregate_dp(df, model_name, dp_degree, n_layer)
         elif tp_degree > 1:
-            e2e = aggregate_tp(df, model_name, tp_degree, n_layer)
+            e2e, carb = aggregate_tp(df, model_name, tp_degree, n_layer)
         elif pp_degree > 1:
-            e2e = aggregate_pp(df, model_name, pp_degree, n_layer, pp_num_microbatch)
+            e2e, carb = aggregate_pp(df, model_name, pp_degree, n_layer, pp_num_microbatch)
     elif fusion:
-        e2e, fw, bw, bwall, acc = aggregate_gpt(df, model_name, 0)
+        e2e, fw, bw, bwall, acc, carb = aggregate_gpt(df, model_name, 0)
     else:
-        e2e, fw, bw, bwall, acc = aggregate_gpt(df, model_name, n_layer)
+        e2e, fw, bw, bwall, acc, carb = aggregate_gpt(df, model_name, n_layer)
 
-    return e2e, fw, bw, bwall, acc
+    return e2e, fw, bw, bwall, acc, carb

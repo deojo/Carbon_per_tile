@@ -706,6 +706,7 @@ def parse_trace(
                         result_df = pd.concat([result_df, pd.DataFrame([row])], ignore_index=True)
 
                     elif row["Name"] == "getitem_5" or row["Name"] == "getitem_6" or row["Name"] == "getitem_7":
+                        print(f"\noutputShape: {row['OutputShape']} for name: {row['Name']}\n")
                         B, S, H = row["OutputShape"]
                         H = H // tp_degree
                         fw_ops = []
@@ -717,6 +718,7 @@ def parse_trace(
                         result_df = pd.concat([result_df, pd.DataFrame([row])], ignore_index=True)
 
                     elif row['Name'] in ['mul', 'mul_1', 'mul_2', 'mul_3']:
+                        print(f"\noutputShape: {row['OutputShape']} for name: {row['Name']}\n")
                         B, S, H = row["OutputShape"]
                         H = H // tp_degree
                         fw_ops = [('VECmulu', (B * S, H))]

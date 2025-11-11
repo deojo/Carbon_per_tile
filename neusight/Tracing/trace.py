@@ -21,6 +21,7 @@ import torch
 import transformers.utils.fx
 transformers.utils.fx.check_if_model_is_supported = lambda x : True
 import transformers.models.switch_transformers.modeling_switch_transformers
+from transformers import LlamaConfig, LlamaForCausalLM
 
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.allow_tf32 = False
@@ -116,6 +117,7 @@ def get_model(model_config_path, is_train, device, fusion):
 
     with open(model_config_path) as f:
         config_json = json.load(f)
+        print(config_json)
     model_name = config_json["architectures"][0].lower()
 
     if "gpt" in model_name:
@@ -124,8 +126,12 @@ def get_model(model_config_path, is_train, device, fusion):
         set_moe.expert_capacity = config_json["expert_capacity"]
         set_moe.num_experts = config_json["num_experts"]
         n_layer = 0
+
     else:
         n_layer = config_json["num_hidden_layers"]
+
+#    if config_json.get("model_type") == "llama":
+#        config = LlamaConfig.from_pretrained(model_config_path)
 
     config = AutoConfig.from_pretrained(model_config_path)
 
@@ -139,6 +145,8 @@ def get_model(model_config_path, is_train, device, fusion):
             model = AutoModelForCausalLM.from_config(config, attn_implementation="eager")
         elif "switch" in model_name.lower():
             model = AutoModelForSeq2SeqLM.from_config(config, attn_implementation="eager")
+        elif "llama" in model_name.lower():            
+            model = LlamaForCausalLM(config)        
         model = model.train()
     else:
         if "bert" in model_name.lower():
@@ -149,6 +157,9 @@ def get_model(model_config_path, is_train, device, fusion):
             model = AutoModelForCausalLM.from_config(config, attn_implementation="eager")
         elif "switch" in model_name.lower():
             model = AutoModelForSeq2SeqLM.from_config(config, attn_implementation="eager")
+        elif "llama" in model_name.lower():
+            print(f"n_layer from llama:{n_layer}")
+            model = LlamaForCausalLM(config)
         else:
             NotImplementedError()
         model = model.eval()
@@ -171,6 +182,7 @@ def trace_fx_graph(batch_size, sequence_length, model_config_path, is_train, ben
         config_json = json.load(f)
     model_name = config_json["architectures"][0].lower()
 
+    print(f"single_layer: {single_layer}")
     # change number of layers to 1
     if single_layer:
         if "gpt" in model_name:
@@ -203,10 +215,11 @@ def trace_fx_graph(batch_size, sequence_length, model_config_path, is_train, ben
         node_dict = []
         for n in graphmodule.graph.nodes:
             nd = n.__dict__.copy()
-            nd["Name"] = nd.pop("name")
+            nd["Name"] = n.name
             node_dict.append(nd)
         df = pd.DataFrame(node_dict)
-        df = df.drop("graph", axis=1)
+        if 'graph' in df.columns:
+            df = df.drop("graph", axis=1)
 
         nodeprop = NodeProp(graphmodule)
         if "switch" in model_name: # 
@@ -218,7 +231,7 @@ def trace_fx_graph(batch_size, sequence_length, model_config_path, is_train, ben
             input_ids = torch.ones(batch_size, sequence_length, dtype=torch.int64, device=device)
             inputs = [input_ids]
         graphmodule = nodeprop.propagate(*inputs, backward=is_train, bench=bench)
-        # print("node proped", flush=True)
+        print("node proped", flush=True)
     except Exception as e:
         raise e
         print(e)
@@ -229,10 +242,14 @@ def trace_fx_graph(batch_size, sequence_length, model_config_path, is_train, ben
     node_dict = []
     for n in graphmodule.graph.nodes:
         nd = n.__dict__.copy()
-        nd["Name"] = nd.pop("name")
+        nd["Name"] = n.name
+        nd["meta"] = n.meta
+        nd["_input_nodes"] = str([m.name for m in n.all_input_nodes])
+        nd["users"] = str([u for u in n.users])
         node_dict.append(nd)
     df = pd.DataFrame(node_dict)
-    df = df.drop("graph", axis=1)
+    if 'graph' in df.columns:
+        df = df.drop("graph", axis=1)
     # df.to_csv(out_name, index=False)
 
     return df

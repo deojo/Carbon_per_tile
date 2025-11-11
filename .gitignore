@@ -8,6 +8,8 @@ log*
 old
 *.pyc
 *.png
+*.csv
+*.json
 out
 out.txt
 out.csv

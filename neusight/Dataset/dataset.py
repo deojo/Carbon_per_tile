@@ -20,6 +20,7 @@ ops_dict = {
     "ln"  : 6., # mean, var, sum, div, sqrt, acc
     "softmax" : 5.,
     "relu" : 1.,
+    "silu" : 1.,
     "fused_relu_add" : 2.,
     "gelu" : 1.,
     "MEM" : 0.,

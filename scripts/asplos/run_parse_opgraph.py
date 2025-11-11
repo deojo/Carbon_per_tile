@@ -61,6 +61,8 @@ def parse():
     launch_task(model_name="gpt3_27", mode="train", batch_size=2, seqlen=2048, blocking=False)
     launch_task(model_name="switchxl4", mode="train", batch_size=1, seqlen=512, blocking=False)
     launch_task(model_name="switchxl4", mode="train", batch_size=2, seqlen=512, blocking=False)
+    launch_task(model_name="llama2", mode="train", batch_size=1, seqlen=512, blocking=False)
+    launch_task(model_name="llama3", mode="train", batch_size=1, seqlen=512, blocking=False)
 
     launch_task(model_name="bert_large", mode="inf", batch_size=8, seqlen=512, blocking=False)
     launch_task(model_name="bert_large", mode="inf", batch_size=16, seqlen=512, blocking=False)

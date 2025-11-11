@@ -15,7 +15,7 @@ OOD_DEVICES = ["NVIDIA_H100_80GB_HBM3", "NVIDIA_L4", "NVIDIA_A100_80GB_PCIe"]
 
 # Operation types and modes
 OPERATION_TYPES = ["all", "BMM", "Linear", "VEC", "VECsoftmax", "VECln"]
-LATENCY_MODES = ["e2e", "fw", "bwall", "bw", "acc"]
+LATENCY_MODES = ["e2e_op", "fw_op", "bwall_op", "bw_op", "acc_op"]
 
 # Model layer markers
 MODEL_LAYERS = {
@@ -186,12 +186,11 @@ def make_summary(result_dir, label_dir):
     model_descs = []
     for subdir, dirs, files in os.walk(str(graph_dir)):
         for file in files:
-            # Check if the file is a CSV
             if file.endswith(".csv"):
                 model_descs.append(file.split(".")[0])
 
     for device in listdir(pred_dir):
-        print(device)
+        print(f"\nProcessing device: {device}")
         entries = []
         for model_desc in model_descs:
             entry = parse_entry(pred_dir, graph_dir, label_dir, device, model_desc)
@@ -204,19 +203,20 @@ def make_summary(result_dir, label_dir):
     df = pd.concat(df_list)
     df = df.copy()
 
-    # drop row if no label
-    # df = df[df['label_all_e2e_latency'].notna()]
-
-    # ape error
+    # ape error with safe column checking
     for predictor in PREDICTOR_LIST:
         for ops in OPERATION_TYPES:
             for mode in ["e2e", "fw", "bwall"]:
                 label_col = f"label_{ops}_{mode}_latency"
                 pred_col = f"{predictor}_{ops}_{mode}_latency"
                 err_col = f"{predictor}_{ops}_{mode}_err"
-                
-                df[err_col] = ape(df[label_col], df[pred_col])
-    
+
+                if label_col in df.columns and pred_col in df.columns:
+                    print(f"Computing error for: {err_col}")
+                    df[err_col] = ape(df[label_col], df[pred_col])
+                else:
+                    print(f"Skipping error computation for: {err_col} (missing {label_col} or {pred_col})")
+
     df = df.replace(float("inf"), 0)
     df["OOD"] = df.apply(lambda x: is_ood(x["model_name"], x["device"]), axis=1)
 

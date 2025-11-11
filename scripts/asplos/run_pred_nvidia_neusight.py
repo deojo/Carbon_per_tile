@@ -41,24 +41,37 @@ def launch_task(model_name, mode, batch_size, seqlen, device, option="", blockin
 def pred():
 
     # main inference
-    for device in ["NVIDIA_H100_80GB_HBM3", "NVIDIA_A100-PCIE-40GB", "Tesla_T4", "Tesla_V100-PCIE-32GB", "Tesla_P100-PCIE-16GB", "Tesla_P4", "NVIDIA_L4",]:
+    #for device in ["NVIDIA_H100_80GB_HBM3", "NVIDIA_A100-PCIE-40GB", "Tesla_T4", "Tesla_V100-PCIE-32GB", "Tesla_P100-PCIE-16GB", "Tesla_P4", "NVIDIA_L4", "NVIDIA_B200",]:
+    
+    #for device in ["NVIDIA_B200", "NVIDIA_H100_80GB_HBM3", "NVIDIA_A100_80GB_PCIe"]:
+
+    for device in ["NVIDIA_H100_80GB_HBM3"]:    
+        #launch_task(model_name="sheared_llama1_3B", mode="inf", batch_size=8, seqlen=512, device=device, blocking=False)
+        #launch_task(model_name="sheared_llama2_7", mode="inf", batch_size=8, seqlen=512, device=device, blocking=False)
+        #launch_task(model_name="llama2", mode="inf", batch_size=8, seqlen=512, device=device, blocking=False)
+        #launch_task(model_name="sparse_llama", mode="inf", batch_size=8, seqlen=512, device=device, blocking=False)
+        #launch_task(model_name="llama3", mode="inf", batch_size=8, seqlen=512, device=device, blocking=False)
+
         launch_task(model_name="bert_large", mode="inf", batch_size=8, seqlen=512, device=device, blocking=False)
         launch_task(model_name="bert_large", mode="inf", batch_size=16, seqlen=512, device=device, blocking=False)
+
         launch_task(model_name="gpt2_large", mode="inf", batch_size=4, seqlen=1024, device=device, blocking=False)
         launch_task(model_name="gpt2_large", mode="inf", batch_size=8, seqlen=1024, device=device, blocking=False)
-        launch_task(model_name="gpt3_xl", mode="inf", batch_size=2, seqlen=2048, device=device, blocking=False)
-        launch_task(model_name="gpt3_xl", mode="inf", batch_size=8, seqlen=2048, device=device, blocking=False)
-        launch_task(model_name="opt_13", mode="inf", batch_size=2, seqlen=2048, device=device, blocking=False)
-        launch_task(model_name="opt_13", mode="inf", batch_size=8, seqlen=2048, device=device, blocking=False)
-        launch_task(model_name="gpt3_27", mode="inf", batch_size=2, seqlen=2048, device=device, blocking=False)
-        launch_task(model_name="gpt3_27", mode="inf", batch_size=8, seqlen=2048, device=device, blocking=False)
-        launch_task(model_name="switchxl4", mode="inf", batch_size=1, seqlen=512, device=device, blocking=False)
-        launch_task(model_name="switchxl4", mode="inf", batch_size=2, seqlen=512, device=device, blocking=False)
+        
+        #launch_task(model_name="gpt3_xl", mode="inf", batch_size=2, seqlen=2048, device=device, blocking=False)
+        #launch_task(model_name="gpt3_xl", mode="inf", batch_size=8, seqlen=2048, device=device, blocking=False)
+        #launch_task(model_name="opt_13", mode="inf", batch_size=2, seqlen=2048, device=device, blocking=False)
+        #launch_task(model_name="opt_13", mode="inf", batch_size=8, seqlen=2048, device=device, blocking=False)
+        #launch_task(model_name="gpt3_27", mode="inf", batch_size=2, seqlen=2048, device=device, blocking=False)
+        #launch_task(model_name="gpt3_27", mode="inf", batch_size=8, seqlen=2048, device=device, blocking=False)
+        #launch_task(model_name="switchxl4", mode="inf", batch_size=1, seqlen=512, device=device, blocking=False)
+        #launch_task(model_name="switchxl4", mode="inf", batch_size=2, seqlen=512, device=device, blocking=False)
         for p in jobs:
             p.wait()
 
+    """
     # main train
-    for device in ["NVIDIA_H100_80GB_HBM3", "NVIDIA_A100_80GB_PCIe", "Tesla_V100-PCIE-32GB", "NVIDIA_L4",]:
+    for device in ["NVIDIA_H100_80GB_HBM3", "NVIDIA_A100_80GB_PCIe", "Tesla_V100-PCIE-32GB", "NVIDIA_L4", "NVIDIA_B200",]:
         launch_task(model_name="bert_large", mode="train", batch_size=2, seqlen=512, device=device, blocking=False)
         launch_task(model_name="bert_large", mode="train", batch_size=8, seqlen=512, device=device, blocking=False)
         launch_task(model_name="gpt2_large", mode="train", batch_size=1, seqlen=1024, device=device, blocking=False)
@@ -71,6 +84,8 @@ def pred():
         launch_task(model_name="gpt3_27", mode="train", batch_size=2, seqlen=2048, device=device, blocking=False)
         launch_task(model_name="switchxl4", mode="train", batch_size=1, seqlen=512, device=device, blocking=False)
         launch_task(model_name="switchxl4", mode="train", batch_size=2, seqlen=512, device=device, blocking=False)
+        launch_task(model_name="llama2", mode="train", batch_size=1, seqlen=512, device=device, blocking=False)
+        launch_task(model_name="llama3", mode="train", batch_size=1, seqlen=512, device=device, blocking=False)
         for p in jobs:
             p.wait()
 
@@ -82,24 +97,42 @@ def pred():
         launch_task(model_name="gpt2_large", mode="inf", batch_size=8, seqlen=1024, device=device, blocking=False, option="fusion")
         for p in jobs:
             p.wait()
+    
 
     # dist
-    for device in ["NVIDIA_H100_80GB_HBM3", "NVIDIA_A100-SXM4-40GB",]:
-        launch_task(model_name="gpt2_large", mode="train", batch_size=4, seqlen=1024, device=device, blocking=False, option="dp4")
-        launch_task(model_name="gpt2_large", mode="train", batch_size=4, seqlen=1024, device=device, blocking=False, option="pp4_1")
-        launch_task(model_name="gpt2_large", mode="train", batch_size=4, seqlen=1024, device=device, blocking=False, option="tp4")
+    for device in ["NVIDIA_H100_80GB_HBM3", "NVIDIA_A100-SXM4-40GB", "Tesla_V100-SXM2-16GB"]:
+        launch_task(model_name="bert", mode="train", batch_size=2, seqlen=512, device=device, blocking=False, option="pp4_1")
+        launch_task(model_name="bert", mode="train", batch_size=1, seqlen=512, device=device, blocking=False, option="pp4_1")
+        #launch_task(model_name="bert", mode="inf", batch_size=8, seqlen=512, device=device, blocking=False)
+        #launch_task(model_name="bert", mode="inf", batch_size=16, seqlen=512, device=device, blocking=False)
+        #launch_task(model_name="opt_13", mode="train", batch_size=1, seqlen=2048, device=device, blocking=False)
+        #launch_task(model_name="opt_13", mode="train", batch_size=2, seqlen=2048, device=device, blocking=False)
+        #launch_task(model_name="llama2", mode="train", batch_size=1, seqlen=2048, device=device, blocking=False, option="tp4")
+        #launch_task(model_name="llama3", mode="train", batch_size=1, seqlen=2048, device=device, blocking=False, option="tp4")
 
-        launch_task(model_name="gpt2_large", mode="train", batch_size=16, seqlen=1024, device=device, blocking=False, option="dp4")
-        launch_task(model_name="gpt2_large", mode="train", batch_size=16, seqlen=1024, device=device, blocking=False, option="pp4_1")
-        launch_task(model_name="gpt2_large", mode="train", batch_size=16, seqlen=1024, device=device, blocking=False, option="tp4")
+        #launch_task(model_name="gpt2_large", mode="train", batch_size=4, seqlen=1024, device=device, blocking=False, option="dp4")
+        #launch_task(model_name="gpt2_large", mode="train", batch_size=4, seqlen=1024, device=device, blocking=False, option="pp4_1")
+        #launch_task(model_name="gpt2_large", mode="train", batch_size=4, seqlen=1024, device=device, blocking=False, option="tp4")
 
-        launch_task(model_name="gpt3_xl", mode="train", batch_size=4, seqlen=2048, device=device, blocking=False, option="dp4")
-        launch_task(model_name="gpt3_xl", mode="train", batch_size=4, seqlen=2048, device=device, blocking=False, option="pp4_1")
-        launch_task(model_name="gpt3_xl", mode="train", batch_size=4, seqlen=2048, device=device, blocking=False, option="tp4")
+        #launch_task(model_name="gpt2_large", mode="train", batch_size=16, seqlen=1024, device=device, blocking=False, option="dp4")
+        #launch_task(model_name="gpt2_large", mode="train", batch_size=16, seqlen=1024, device=device, blocking=False, option="pp4_1")
+        #launch_task(model_name="gpt2_large", mode="train", batch_size=16, seqlen=1024, device=device, blocking=False, option="tp4")
+
+        #launch_task(model_name="gpt3_xl", mode="train", batch_size=4, seqlen=2048, device=device, blocking=False, option="dp4")
+        #launch_task(model_name="gpt3_xl", mode="train", batch_size=4, seqlen=2048, device=device, blocking=False, option="pp4_1")
+        #launch_task(model_name="gpt3_xl", mode="train", batch_size=4, seqlen=2048, device=device, blocking=False, option="tp4")
         for p in jobs:
             p.wait()
 
+    """
+
 def main():
+    output_file = os.path.join('results', 'prediction', 'carbon_summary.csv')
+
+    # Delete the summary csv file at the beginning if it exists
+    if os.path.exists(output_file):
+        os.remove(output_file)
+
     pred()
 
 try:
