@@ -1,8 +1,0 @@
-,,,A100x4,,,H100x4,,,
-,Global batch size,,DP,TP,PP,DP,TP,PP,
-GPT2-Large,4,Measured Latency (ms),452.3,484.9,1597.6,194.9,211.1,637.5,
-,,NeuSight Prediction (ms),510.5 (12.9%),525.6 (8.4%),1761.6 (10.3%),214.1 (9.9%),228.1 (8.0%),650.2 (2.0%),
-,16,Measured Latency (ms),,,,642.1,729.7,2384.0,
-,,NeuSight Prediction (ms),,,,649.6 (1.2%),825.1 (13.1%),2638.4 (10.7%),
-GPT3-XL,4,Measured Latency (ms),,,,,1010.5,3554.4,
-,,NeuSight Prediction (ms),,,,,1047.6 (3.7%),3717.0 (4.6%),
