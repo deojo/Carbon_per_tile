@@ -1,8 +1,0 @@
-{
-    "num_layer": 24,
-    "e2e_latency": 1143.9164342627741,
-    "fw_latency": 1143.9164342627741,
-    "bwall_latency": 0.0,
-    "bw_latency": 0.0,
-    "acc_latency": 0.0
-}
