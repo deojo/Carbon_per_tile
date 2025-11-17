@@ -80,28 +80,6 @@ class Trainer:
             self.model = self.model.train()
             losses = []
 
-            for batch_o, batch_x, batch_m, batch_y in self.train_dataloader:
-                batch_x = batch_x.float().to(self.device)
-                batch_y = batch_y.float().to(self.device)
-
-                self.optim.zero_grad()
-
-                pred = self.model(batch_o, batch_x, batch_m.to(self.device))
-
-                # Fix: handle case where model returns a list instead of a tensor
-                print(type(pred))
-                if isinstance(pred, list):
-                    pred = pred[0]
-
-                # Ensure pred is on the correct device
-                pred = pred.to(self.device)
-
-                loss = self.criterion(pred, batch_y.reshape(pred.shape))
-                loss.backward()
-                losses.append(loss.item())
-                self.optim.step()
-
-
             """
             for batch_o, batch_x, batch_m, batch_y in self.train_dataloader:
                 batch_x = batch_x.float()
@@ -114,6 +92,27 @@ class Trainer:
                 losses.append(loss.item())
                 self.optim.step()
             """
+
+            for batch_o, batch_x, batch_m, batch_y in self.train_dataloader:
+                batch_x = batch_x.float().to(self.device)
+                batch_y = batch_y.float().to(self.device)
+
+                self.optim.zero_grad()
+
+                pred = self.model(batch_o, batch_x, batch_m.to(self.device))
+
+                # handle case where model returns a list instead of a tensor
+                if isinstance(pred, list):
+                    pred = pred[0]
+
+                # Ensure pred is on the correct device
+                pred = pred.to(self.device)
+
+                loss = self.criterion(pred, batch_y.reshape(pred.shape))
+                loss.backward()
+                losses.append(loss.item())
+                self.optim.step()
+
 
             train_loss = sum(losses) / len(losses)
 

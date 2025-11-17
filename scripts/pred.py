@@ -1,6 +1,14 @@
-import neusight
 import argparse
 from pathlib import Path
+import os
+import sys
+
+# Ensure the local NeuSight package is importable before any site-packages
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+import neusight
 
 parser = argparse.ArgumentParser()
 
@@ -21,8 +29,6 @@ parser.add_argument("--options", type=str, help="Options", default="")
 parser.add_argument("--running_device", type=str, help="Options", default=None)
 
 args = parser.parse_args()
-
-import os
 if args.running_device is not None:
     os.environ["CUDA_VISIBLE_DEVICES"] = args.running_device.split(":")[1]
 

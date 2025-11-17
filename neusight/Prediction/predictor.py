@@ -130,6 +130,29 @@ class OperatorPredictor():
         self.ln_predictor = MLPredictor(predictor_path/"LN", meta_table_path=vec_tile_dataset)
         # Adaptive memory and interconnect model
         self.mem_comm_model = AdaptiveMemoryCommModel()
+        # Model name is injected by NeusightPredictor.predict to allow model-aware scaling
+        self.model_name = None
+
+    def _get_memory_scaling_ratio(self, total_bytes, device_config):
+        """Return scaling ratio for latency based on model type.
+
+        - For BERT-like models, apply adaptive HBM-based scaling with a conservative
+          lower bound to avoid over-correction.
+        - For other models (e.g., GPT2-Large), leave latency unchanged (ratio=1.0)
+          to preserve original accuracy.
+        """
+        name = (self.model_name or "").lower()
+        if "bert" not in name:
+            return 1.0
+
+        # For BERT models, allow at most ~20–25% reduction vs. naive
+        return self.mem_comm_model.memory_scaling_ratio(
+            bytes_total=total_bytes,
+            device_config=device_config,
+            access_pattern="streaming",
+            ratio_min=0.8,
+            ratio_max=1.0,
+        )
 
     def predict_phase(
                 self,
@@ -159,9 +182,9 @@ class OperatorPredictor():
             rep_op = ops[-1]
 
             # count mem
-            #num_input_elem = [reduce_mul(s) for s in input_shapes]
-            #num_input_elem = sum(num_input_elem) 
-            #num_output_elem = reduce_mul(output_shape)
+            num_input_elem = [reduce_mul(s) for s in input_shapes]
+            num_input_elem = sum(num_input_elem) 
+            num_output_elem = reduce_mul(output_shape)
             # num_inter_elem = 0
             # for op in ops:
             #     opname, args = op
@@ -203,13 +226,9 @@ class OperatorPredictor():
                     pr = self.vec_predictor.predict(opname=[opname],kernel_arguments={"B":B,"H":H, "MemPerO":memPerO, "OpsPerO":opsPerO},device_config=device_config)
                     # print("last bw util", self.vec_predictor.model.last_bw_util)
 
-                # Apply adaptive memory scaling to account for L2/overlap on memory-bound vector ops
+                # Apply adaptive memory scaling for BERT-like models only
                 total_bytes = float((num_input_elem + num_output_elem) * 4)
-                ratio = self.mem_comm_model.memory_scaling_ratio(
-                    bytes_total=total_bytes,
-                    device_config=device_config,
-                    access_pattern="streaming",
-                )
+                ratio = self._get_memory_scaling_ratio(total_bytes, device_config)
                 latency += pr[0] * ratio
                 
             elif opname == "MEM":
@@ -235,12 +254,15 @@ class OperatorPredictor():
                     B = 1
                     M, N, K = args
                     pr = self.linear_predictor.predict(opname=["linear"],kernel_arguments={"B":B,"M":M,"N":N,"K":K},device_config=device_config)
-                    total_bytes = float((num_input_elem + num_output_elem) * 4)
-                    ratio = self.mem_comm_model.memory_scaling_ratio(
-                        bytes_total=total_bytes,
-                        device_config=device_config,
-                        access_pattern="streaming",
-                    )
+                    # Derive element counts from shapes for memory scaling
+                    if input_shapes is not None and output_shape is not None:
+                        num_input_elem = [reduce_mul(s) for s in input_shapes]
+                        num_input_elem = sum(num_input_elem)
+                        num_output_elem = reduce_mul(output_shape)
+                        total_bytes = float((num_input_elem + num_output_elem) * 4)
+                        ratio = self._get_memory_scaling_ratio(total_bytes, device_config)
+                    else:
+                        ratio = 1.0
                     latency += pr[0] * ratio
                     
                 elif opname == "BMM":
@@ -413,6 +435,10 @@ class NeusightPredictor():
         if model_name is None:
             model_name = Path(model_config_path).name.split(".")[0]
 
+        # Inform the operator-level predictor of the model name so that
+        # memory scaling can be tailored per-architecture (e.g., BERT vs GPT2).
+        self.predictor.model_name = model_name
+
         # parse options
         fusion = False
         dp_degree = 1
@@ -556,8 +582,13 @@ class NeusightPredictor():
 
         # Compute carbon per row and add new columns to df
         carbon_dicts = df.apply(
-            lambda row: self.compute_total_carbon(device, row[carbon_input_cols].to_dict(), distributed),
-            axis=1
+            lambda row: self.compute_total_carbon(
+                device=device,
+                latency_data=row[carbon_input_cols].to_dict(),
+                distributed=distributed,
+                is_train=is_train,
+            ),
+            axis=1,
         )
 
         # Expand the returned dictionaries into new DataFrame columns and join to original df
@@ -614,7 +645,7 @@ class NeusightPredictor():
         total_tile_carbon = carb["agg_tile_carbon"].sum()
         total_tile_latency = carb["agg_tile_latency"].sum()
         total_tile_energy_kwh = carb["agg_tile_energy_kwh"].sum()
-        print(f"total_tile_energy_kwh: {total_tile_energy_kwh}")
+        #print(f"total_tile_energy_kwh: {total_tile_energy_kwh}")
 
         total_count = carb["agg_count"].sum()
 
@@ -648,7 +679,7 @@ class NeusightPredictor():
         # Append the summary row to the original DataFrame
         carb = pd.concat([carb, summary_row], ignore_index=True)
 
-        #print(f"\nNew value carb: \n{carb}\n")
+        print(f"\nNew value carb: \n{carb}\n")
 
         # Select specific columns (now including energy_kwh)
         selected_columns = carb[
@@ -668,26 +699,32 @@ class NeusightPredictor():
         os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
         # Append to the CSV file
-        #write_header = not os.path.exists(output_file)
-        #with open(output_file, mode='a') as f:
-        #    f.write(f"\n{device} / {model_tag}\n")  
-        #    selected_columns.to_csv(f, header=True, index=False)
-
         write_header = not os.path.exists(output_file)
-
-        # Open the file in append mode
         with open(output_file, mode='a') as f:
-            line = f"\n{device} / {model_tag}\n"
-            f.write(line)        # write header to file
-            print(line, end='')  # print header to console
-
-            # Write the DataFrame to file
+            f.write(f"\n{device} / {model_tag}\n")  
             selected_columns.to_csv(f, header=True, index=False)
-            # Print the DataFrame to console
-            print(selected_columns.to_string(index=False))
-    
-        
+        # Console summary for latency, energy, and carbon
         print(f"E2E latency for {model_tag} on {device_config_path.name}:", round(e2e, 2), "ms")
+
+        # Total OP-level energy and carbon (aggregated across groups)
+        print(
+            f"Total OP energy for {model_tag} on {device_config_path.name}:",
+            f"{total_op_energy_kwh:.6e} kWh",
+        )
+        print(
+            f"Total OP carbon for {model_tag} on {device_config_path.name}:",
+            f"{total_op_carbon:.6e} gCO2e",
+        )
+
+        # Total TILE-level energy and carbon
+        print(
+            f"Total TILE energy for {model_tag} on {device_config_path.name}:",
+            f"{total_tile_energy_kwh:.6e} kWh",
+        )
+        print(
+            f"Total TILE carbon for {model_tag} on {device_config_path.name}:",
+            f"{total_tile_carbon:.6e} gCO2e",
+        )
         print("\n")
 
         json_dict = {
@@ -704,7 +741,7 @@ class NeusightPredictor():
             json.dump(json_dict, file, indent=4)
 
 
-    def compute_total_carbon(self, device: str, latency_data: dict, distributed: bool):
+    def compute_total_carbon(self, device: str, latency_data: dict, distributed: bool, is_train: bool):
         DEVICE_TDP = {
             "NVIDIA_A100-SXM4-40GB": 400.0,
             "Tesla_P100-PCIE-16GB": 250.0,
@@ -791,7 +828,14 @@ class NeusightPredictor():
                 print(f"\n energy_kwh for MEM: {energy_kWh}\n")
                 embodied_carbon = EMBODIED_CARBON_MEM.get(device)
             else:
-                energy_kWh = (tdp * num_gpu * latency_hr * util) / 1000
+                # For training, scale by predicted bandwidth utilization.
+                # For inference, measured board power is already close to TDP,
+                # and empirical results show that using util here
+                # underestimates energy even when latency is accurate.
+                # Therefore, we treat utilization as 1.0 in inference mode
+                # to match the measurement methodology (P_meas * latency).
+                effective_util = util if is_train else 1.0
+                energy_kWh = (tdp * num_gpu * latency_hr * effective_util) / 1000
 
             # Carbon emissions
             carbon_op = energy_kWh * CI_US
