@@ -9,6 +9,7 @@ from ..Model.model_provider import model_provider
 from ..Tracing.parse import parse_trace
 from ..Tracing.trace import trace_graph
 from .aggregator import aggregate_latency
+from .memory_model import AdaptiveMemoryCommModel
 from ..Model.mlp_wave_vec import MLPWaveVec
 from ..Model.mlp_wave_mm import MLPWaveMM
 
@@ -127,6 +128,8 @@ class OperatorPredictor():
         self.vec_predictor = MLPredictor(predictor_path/"VEC", meta_table_path=vec_tile_dataset)
         self.softmax_predictor = MLPredictor(predictor_path/"SOFTMAX", meta_table_path=vec_tile_dataset)
         self.ln_predictor = MLPredictor(predictor_path/"LN", meta_table_path=vec_tile_dataset)
+        # Adaptive memory and interconnect model
+        self.mem_comm_model = AdaptiveMemoryCommModel()
 
     def predict_phase(
                 self,
@@ -136,9 +139,14 @@ class OperatorPredictor():
                 output_shape,
                 ops,
     ):
-        latency = 0
-        mem = 0
+        latency = 0.0
+        mem_effective_bytes = 0.0
         pr = [0.0, float("NaN"), float("NaN"), float("NaN"), float("NaN")]
+
+        # count mem
+        num_input_elem = [reduce_mul(s) for s in input_shapes]
+        num_input_elem = sum(num_input_elem) 
+        num_output_elem = reduce_mul(output_shape)
 
         if opname == "fused":
             assert(input_shapes is not None)
@@ -151,9 +159,9 @@ class OperatorPredictor():
             rep_op = ops[-1]
 
             # count mem
-            num_input_elem = [reduce_mul(s) for s in input_shapes]
-            num_input_elem = sum(num_input_elem) 
-            num_output_elem = reduce_mul(output_shape)
+            #num_input_elem = [reduce_mul(s) for s in input_shapes]
+            #num_input_elem = sum(num_input_elem) 
+            #num_output_elem = reduce_mul(output_shape)
             # num_inter_elem = 0
             # for op in ops:
             #     opname, args = op
@@ -195,11 +203,25 @@ class OperatorPredictor():
                     pr = self.vec_predictor.predict(opname=[opname],kernel_arguments={"B":B,"H":H, "MemPerO":memPerO, "OpsPerO":opsPerO},device_config=device_config)
                     # print("last bw util", self.vec_predictor.model.last_bw_util)
 
-                latency += pr[0]
+                # Apply adaptive memory scaling to account for L2/overlap on memory-bound vector ops
+                total_bytes = float((num_input_elem + num_output_elem) * 4)
+                ratio = self.mem_comm_model.memory_scaling_ratio(
+                    bytes_total=total_bytes,
+                    device_config=device_config,
+                    access_pattern="streaming",
+                )
+                latency += pr[0] * ratio
                 
             elif opname == "MEM":
-                mem = (num_input_elem + num_output_elem) * 4
-                latency += mem / (self.mem_bw * (2**30))
+                # Streaming memory copy modeled via adaptive HBM
+                total_bytes = float((num_input_elem + num_output_elem) * 4)
+                mem_lat_s, eff_bytes, _ = self.mem_comm_model.compute_mem_latency_bytes(
+                    bytes_total=total_bytes,
+                    device_config=device_config,
+                    access_pattern="streaming",
+                )
+                latency += mem_lat_s
+                mem_effective_bytes += eff_bytes
             elif opname == "misc":
                 assert(0)
             else:
@@ -213,7 +235,13 @@ class OperatorPredictor():
                     B = 1
                     M, N, K = args
                     pr = self.linear_predictor.predict(opname=["linear"],kernel_arguments={"B":B,"M":M,"N":N,"K":K},device_config=device_config)
-                    latency += pr[0]
+                    total_bytes = float((num_input_elem + num_output_elem) * 4)
+                    ratio = self.mem_comm_model.memory_scaling_ratio(
+                        bytes_total=total_bytes,
+                        device_config=device_config,
+                        access_pattern="streaming",
+                    )
+                    latency += pr[0] * ratio
                     
                 elif opname == "BMM":
                     B, M, N, K = args
@@ -244,21 +272,33 @@ class OperatorPredictor():
 
                       
                 elif opname == "MEM":
-                    mem = 0
+                    total_bytes = 0.0
                     for shape in args:
-                        mem += reduce_mul(shape)*4
-                    latency += mem / (self.mem_bw * (2**30))
+                        total_bytes += float(reduce_mul(shape) * 4)
+                    mem_lat_s, eff_bytes, _ = self.mem_comm_model.compute_mem_latency_bytes(
+                        bytes_total=total_bytes,
+                        device_config=device_config,
+                        access_pattern="streaming",
+                    )
+                    latency += mem_lat_s
+                    mem_effective_bytes += eff_bytes
                 
                 elif opname == "ALLREDUCE" or opname=="ALLREDUCE_ASYNC":
                     buffer_size = args[0]
                     num_gpu = 8
-                    
-                    latency += (buffer_size * 4) / (self.link_bw * (2**30)) * (num_gpu - 1)
+                    latency += self.mem_comm_model.compute_allreduce_latency_ring(
+                        bytes_total=float(buffer_size * 4),
+                        link_bw_gbps=float(self.link_bw),
+                        num_gpu=num_gpu,
+                    )
                     # latency += (buffer_size * 4) * self.bw_coeff + self.bw_bias
 
                 elif opname == "SENDRECV":
                     buffer_size = args[0]
-                    latency += (buffer_size * 4) / (self.link_bw * (2**30))
+                    latency += self.mem_comm_model.compute_sendrecv_latency(
+                        bytes_total=float(buffer_size * 4),
+                        link_bw_gbps=float(self.link_bw),
+                    )
                     # latency += (buffer_size * 4) * self.bw_coeff + self.bw_bias
                 
                 elif opname == "misc":
@@ -268,9 +308,8 @@ class OperatorPredictor():
                     print(opname)
                     raise NotImplementedError
 
-        #print(f"in predict_phase pr1: {pr[1]}, pr2: {pr[2]}, pr3: {pr[3]}, pr4: {pr[4]}")    
-        mem_energy_pj = mem * 3.6
-        mem_energy_kwh = mem_energy_pj * (100/36) * (10 ** -19)
+        # Convert effective HBM bytes to energy for carbon accounting
+        mem_energy_kwh = self.mem_comm_model.bytes_to_kwh(mem_effective_bytes)
         return (latency, pr[1], pr[2], pr[3], pr[4], mem_energy_kwh)
         #return (latency, pr[1], pr[2], pr[3], pr[4])
 
@@ -575,7 +614,7 @@ class NeusightPredictor():
         total_tile_carbon = carb["agg_tile_carbon"].sum()
         total_tile_latency = carb["agg_tile_latency"].sum()
         total_tile_energy_kwh = carb["agg_tile_energy_kwh"].sum()
-        #print(f"total_tile_energy_kwh: {total_tile_energy_kwh}")
+        print(f"total_tile_energy_kwh: {total_tile_energy_kwh}")
 
         total_count = carb["agg_count"].sum()
 
@@ -609,7 +648,7 @@ class NeusightPredictor():
         # Append the summary row to the original DataFrame
         carb = pd.concat([carb, summary_row], ignore_index=True)
 
-        print(f"\nNew value carb: \n{carb}\n")
+        #print(f"\nNew value carb: \n{carb}\n")
 
         # Select specific columns (now including energy_kwh)
         selected_columns = carb[
@@ -629,10 +668,24 @@ class NeusightPredictor():
         os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
         # Append to the CSV file
+        #write_header = not os.path.exists(output_file)
+        #with open(output_file, mode='a') as f:
+        #    f.write(f"\n{device} / {model_tag}\n")  
+        #    selected_columns.to_csv(f, header=True, index=False)
+
         write_header = not os.path.exists(output_file)
+
+        # Open the file in append mode
         with open(output_file, mode='a') as f:
-            f.write(f"\n{device} / {model_tag}\n")  
+            line = f"\n{device} / {model_tag}\n"
+            f.write(line)        # write header to file
+            print(line, end='')  # print header to console
+
+            # Write the DataFrame to file
             selected_columns.to_csv(f, header=True, index=False)
+            # Print the DataFrame to console
+            print(selected_columns.to_string(index=False))
+    
         
         print(f"E2E latency for {model_tag} on {device_config_path.name}:", round(e2e, 2), "ms")
         print("\n")

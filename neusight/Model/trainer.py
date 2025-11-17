@@ -81,6 +81,29 @@ class Trainer:
             losses = []
 
             for batch_o, batch_x, batch_m, batch_y in self.train_dataloader:
+                batch_x = batch_x.float().to(self.device)
+                batch_y = batch_y.float().to(self.device)
+
+                self.optim.zero_grad()
+
+                pred = self.model(batch_o, batch_x, batch_m.to(self.device))
+
+                # Fix: handle case where model returns a list instead of a tensor
+                print(type(pred))
+                if isinstance(pred, list):
+                    pred = pred[0]
+
+                # Ensure pred is on the correct device
+                pred = pred.to(self.device)
+
+                loss = self.criterion(pred, batch_y.reshape(pred.shape))
+                loss.backward()
+                losses.append(loss.item())
+                self.optim.step()
+
+
+            """
+            for batch_o, batch_x, batch_m, batch_y in self.train_dataloader:
                 batch_x = batch_x.float()
                 batch_y = batch_y.float()
 
@@ -90,6 +113,7 @@ class Trainer:
                 loss.backward()
                 losses.append(loss.item())
                 self.optim.step()
+            """
 
             train_loss = sum(losses) / len(losses)
 
@@ -108,7 +132,15 @@ class Trainer:
                 batch_x = batch_x.float()
                 batch_y = batch_y.float().numpy()
 
-                pred = self.model(batch_o, batch_x.to(self.device), batch_m.to(self.device)).detach().cpu().numpy()
+                #pred = self.model(batch_o, batch_x.to(self.device), batch_m.to(self.device)).detach().cpu().numpy()
+                pred = self.model(batch_o, batch_x.to(self.device), batch_m.to(self.device))
+
+                # handle list outputs
+                if isinstance(pred, list):
+                    pred = pred[0]
+
+                pred = pred.detach().cpu().numpy()
+
                 pred = pred.reshape(batch_y.shape)
                 pred = np.maximum(pred, 0) # for habitat
 
